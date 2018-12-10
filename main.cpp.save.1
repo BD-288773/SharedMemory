@@ -1,0 +1,203 @@
+//
+// Created by szymsid on 08.12.18.
+//
+
+#include <ctime>
+#include <cstdlib>
+#include <iostream>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <pthread.h>
+#include "queue_fifo.h"
+#include "sem.h"
+
+using namespace std;
+
+Queue_FIFO *queue;
+Semaphore mutex(1,"Critical section");
+Semaphore evenProducer(1, "Even producer");
+Semaphore oddProducer(0, "Odd producer");
+Semaphore evenConsumer(0, "Even consumer");
+Semaphore oddConsumer(0, "Odd consumer");
+int countOfEvenProducers;
+int countOfOddProducers;
+int countOfEvenConsumers;
+int countOfOddConsumers;
+
+void * produceEvenNumber(void * args);
+void * produceOddNumber(void * args);
+void * consumeEvenNumber(void * args);
+void * consumeOddNumber(void * args);
+
+int main(){
+
+    int segment_id;
+    int* shared_memory;
+    const size_t shared_segment_size = sizeof(Queue_FIFO)/* + 4*sizeof(int)*/;
+
+
+    pthread_t evenProducerThread;
+    pthread_t oddProducerThread;
+    pthread_t evenConsumerThread;
+    pthread_t oddConsumerThread;
+
+    segment_id = shm_open("buffer&globals", O_CREAT | O_RDWR, 0666);
+    ftruncate(segment_id, shared_segment_size);
+    shared_memory = (int*) mmap(nullptr,shared_segment_size, PROT_READ | PROT_WRITE, MAP_SHARED, segment_id, 0);
+
+    queue = (Queue_FIFO*) shared_memory;
+    /*countOfEvenConsumers = shared_memory + 1;
+    countOfOddConsumers = shared_memory + 2;
+    countOfEvenProducers = shared_memory + 3;
+    countOfOddProducers = shared_memory + 4;
+*/
+    countOfEvenConsumers = 0;
+    countOfEvenProducers = 0;
+    countOfOddConsumers = 0;
+    countOfOddProducers = 0;
+
+
+    srand(time(nullptr));
+
+    queue->setDefault();
+
+    pthread_create(&evenProducerThread, nullptr, produceEvenNumber, (void *) queue);
+    pthread_create(&oddProducerThread, nullptr, produceOddNumber, (void *) queue);
+    pthread_create(&evenConsumerThread, nullptr, consumeEvenNumber, (void *) queue);
+    pthread_create(&oddConsumerThread, nullptr, consumeOddNumber, (void *) queue);
+
+    pthread_join(evenProducerThread, nullptr);
+    pthread_join(oddProducerThread, nullptr);
+    pthread_join(evenConsumerThread, nullptr);
+    pthread_join(oddConsumerThread, nullptr);
+
+
+    mutex.clean();
+    oddConsumer.clean();
+    oddProducer.clean();
+    evenConsumer.clean();
+    evenProducer.clean();
+    munmap(nullptr, sizeof(Queue_FIFO));
+    return 0;
+}
+
+void * produceEvenNumber(void * args){
+
+    int even;
+
+    while(true){
+
+        even = rand()%100;
+        if(even%2 == 1) even = (even+1)%100;
+
+        mutex.down();
+        if(queue->getEvenCount() >= 10){
+            ++countOfEvenProducers;
+            mutex.up();
+            evenProducer.down();
+            --countOfEvenProducers;
+        }
+        sleep(1);
+        queue->put(even);
+        cout << "Process A1 in action." << endl;
+        queue->showQueue();
+        if(queue->getEvenCount()> queue->getOddCount() && countOfOddProducers > 0)
+            oddProducer.up();
+        else if(queue->getCount() >= 3 && *countOfEvenConsumers > 0 && queue->isFirstEven())
+            evenConsumer.up();
+        else if(queue->getCount() >= 7 && *countOfOddConsumers > 0 && !queue->isFirstEven())
+            oddConsumer.up();
+        else
+            mutex.up();
+
+    }
+}
+
+void * produceOddNumber(void * args){
+
+    int odd;
+
+    while(true){
+
+        odd = rand()%100;
+        if(odd%2 == 1) odd = (odd+1)%100;
+        mutex.down();
+        if(queue->getEvenCount()> queue->getOddCount()){
+            ++countOfOddProducers;
+            mutex.up();
+            oddProducer.down();
+            --countOfOddProducers;
+        }
+        queue->put(odd);
+        cout << "Process A2 in action." << endl;
+        queue->showQueue();
+        if(queue->getEvenCount() < 10 && *countOfEvenProducers > 0)
+            oddProducer.up();
+        else if(queue->getCount() >= 3 && *countOfEvenConsumers > 0 && queue->isFirstEven())
+            evenConsumer.up();
+        else if(queue->getCount() >= 7 && *countOfOddConsumers > 0 && !queue->isFirstEven())
+            oddConsumer.up();
+        else
+            mutex.up();
+
+
+    }
+
+}
+
+void * consumeEvenNumber(void * args){
+
+    while(true){
+
+        mutex.down();
+        if(queue->getCount() < 3 || !queue->isFirstEven()){
+            ++countOfEvenConsumers;
+            mutex.up();
+            evenConsumer.down();
+            --countOfEvenConsumers;
+        }
+        queue->get();
+        cout << "Process B1 in action." << endl;
+        queue->showQueue();
+        if(queue->getEvenCount() < 10 && *countOfEvenProducers > 0)
+            evenProducer.up();
+        else if(queue->getEvenCount() > queue->getOddCount() && *countOfOddProducers > 0)
+            oddProducer.up();
+        else if(queue->getCount() >= 7 && *countOfOddConsumers > 0 && !queue->isFirstEven())
+            oddConsumer.up();
+        else
+            mutex.up();
+
+    }
+
+}
+
+void * consumeOddNumber(void * args){
+
+    while(true){
+
+        mutex.down();
+        if(queue->getCount() < 7 || queue->isFirstEven()){
+            ++countOfOddConsumers;
+            mutex.up();
+            oddConsumer.down();
+            --countOfOddConsumers;
+        }
+        queue->get();
+        cout << "Process B2 in action." << endl;
+        queue->showQueue();
+        if(queue->getEvenCount() < 10 && *countOfEvenProducers > 0)
+            evenProducer.up();
+        else if(queue->getEvenCount() > queue->getOddCount() && *countOfOddProducers > 0)
+            oddProducer.up();
+        else if(queue->getCount() >= 3 && *countOfOddConsumers > 0 && queue->isFirstEven())
+            evenConsumer.up();
+        else
+            mutex.up();
+
+    }
+
+}
